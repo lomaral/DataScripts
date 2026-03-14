@@ -32,57 +32,97 @@ def load_config(config_path: str = "config.json") -> dict:
         return json.load(f)
 
 
-def process_file(filepath: str, id_column: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def process_file(filepath: str, id_column: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Load a single file, dedupe on id_column (keep first), return clean df and duplicates.
     
     Returns:
         - clean_df: deduplicated dataframe (first occurrence kept)
         - duplicates_df: rows that were duplicates (for reporting)
+        - diagnostics: dict with row counts and issues
     """
+    diagnostics = {
+        'file': os.path.basename(filepath),
+        'original_rows': 0,
+        'null_ids': 0,
+        'whitespace_ids': 0,
+        'duplicates': 0,
+        'final_rows': 0
+    }
+    
     if not os.path.exists(filepath):
         print(f"  WARNING: File not found: {filepath}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), diagnostics
     
     df = pd.read_csv(filepath, dtype=str)  # Read all as strings to preserve data
+    diagnostics['original_rows'] = len(df)
     
     if id_column not in df.columns:
         print(f"  ERROR: ID column '{id_column}' not found in {filepath}")
         print(f"         Available columns: {list(df.columns)}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), diagnostics
+    
+    # Check for null/empty IDs
+    null_mask = df[id_column].isna() | (df[id_column].str.strip() == '')
+    null_ids_df = df[null_mask].copy()
+    diagnostics['null_ids'] = len(null_ids_df)
+    
+    # Check for whitespace issues (IDs with leading/trailing spaces)
+    whitespace_mask = df[id_column].str.strip() != df[id_column]
+    diagnostics['whitespace_ids'] = whitespace_mask.sum()
+    
+    # Clean the ID column - strip whitespace
+    df[id_column] = df[id_column].str.strip()
+    
+    # Remove null IDs
+    df = df[~null_mask]
     
     # Find duplicates BEFORE deduping
     duplicate_mask = df.duplicated(subset=[id_column], keep='first')
     duplicates_df = df[duplicate_mask].copy()
+    diagnostics['duplicates'] = len(duplicates_df)
+    
     if not duplicates_df.empty:
         duplicates_df['_source_file'] = os.path.basename(filepath)
         duplicates_df['_issue'] = 'duplicate_in_file'
     
     # Dedupe - keep first occurrence
     clean_df = df.drop_duplicates(subset=[id_column], keep='first')
+    diagnostics['final_rows'] = len(clean_df)
     
-    print(f"  {os.path.basename(filepath)}: {len(df)} rows → {len(clean_df)} unique ({len(duplicates_df)} duplicates)")
+    print(f"  {os.path.basename(filepath)}: {diagnostics['original_rows']} rows → {len(clean_df)} unique")
+    if diagnostics['null_ids'] > 0:
+        print(f"    ⚠ {diagnostics['null_ids']} rows with NULL/empty ID (excluded)")
+    if diagnostics['whitespace_ids'] > 0:
+        print(f"    ⚠ {diagnostics['whitespace_ids']} IDs had whitespace (stripped)")
+    if diagnostics['duplicates'] > 0:
+        print(f"    ⚠ {diagnostics['duplicates']} duplicates (kept first)")
     
-    return clean_df, duplicates_df
+    return clean_df, duplicates_df, diagnostics
 
 
-def merge_files(config: dict, id_column: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def merge_files(config: dict, id_column: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list]:
     """
     Merge all files for an object using outer join on id_column.
     
     Returns:
         - merged_df: fully merged dataframe
-        - anomalies_df: all anomalies (duplicates + missing from files)
+        - incomplete_df: records missing from some files
+        - anomalies_df: duplicates
+        - comparison_df: file comparison details
+        - all_diagnostics: list of diagnostics per file
     """
     files = config['files']
     all_duplicates = []
     dataframes = []
     file_id_sets = {}  # Track which IDs are in which files
+    all_diagnostics = []
     
     print(f"\nProcessing {len(files)} files...")
     
     for filepath in files:
-        clean_df, duplicates_df = process_file(filepath, id_column)
+        clean_df, duplicates_df, diagnostics = process_file(filepath, id_column)
+        all_diagnostics.append(diagnostics)
         
         if clean_df.empty:
             continue
@@ -217,7 +257,7 @@ def merge_files(config: dict, id_column: str) -> tuple[pd.DataFrame, pd.DataFram
     for fname, ids in file_id_sets.items():
         print(f"  {fname}: {len(ids)} unique IDs")
     
-    return clean_df, incomplete_df, anomalies_df, comparison_df
+    return clean_df, incomplete_df, anomalies_df, comparison_df, all_diagnostics
 
 
 def process_object(object_name: str, config: dict, output_dir: str = "output"):
@@ -227,18 +267,41 @@ def process_object(object_name: str, config: dict, output_dir: str = "output"):
     print(f"{'='*60}")
     
     id_column = config['id_column']
+    external_id_prefix = config.get('external_id_prefix', object_name.upper())
+    
     print(f"ID Column: {id_column}")
+    print(f"External ID Prefix: {external_id_prefix}")
     print(f"Files: {config['files']}")
     
     # Merge all files
-    clean_df, incomplete_df, duplicates_df, comparison_df = merge_files(config, id_column)
+    clean_df, incomplete_df, duplicates_df, comparison_df, diagnostics = merge_files(config, id_column)
     
     if clean_df.empty and incomplete_df.empty:
         print(f"ERROR: No data merged for {object_name}")
         return
     
+    # Generate External ID column
+    if not clean_df.empty:
+        clean_df['External_ID__c'] = external_id_prefix + '-' + clean_df[id_column].astype(str)
+        # Move External_ID__c to first column
+        cols = ['External_ID__c'] + [c for c in clean_df.columns if c != 'External_ID__c']
+        clean_df = clean_df[cols]
+    
+    if not incomplete_df.empty:
+        incomplete_df['External_ID__c'] = external_id_prefix + '-' + incomplete_df[id_column].astype(str)
+        # Move External_ID__c to first column (before _missing_from)
+        cols = ['External_ID__c'] + [c for c in incomplete_df.columns if c not in ['External_ID__c', '_missing_from']] + ['_missing_from']
+        incomplete_df = incomplete_df[cols]
+    
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Save diagnostics report (row counts, nulls, whitespace issues)
+    if diagnostics:
+        diag_path = os.path.join(output_dir, f"{object_name}_diagnostics.csv")
+        pd.DataFrame(diagnostics).to_csv(diag_path, index=False)
+        print(f"\n✓ Diagnostics saved: {diag_path}")
+        print(f"  Shows row counts, null IDs, whitespace issues per file")
     
     # Save clean merged file (records in ALL files - ready for Data Loader)
     if not clean_df.empty:
