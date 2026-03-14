@@ -1,19 +1,3 @@
-"""
-Legacy File Merger for Salesforce Data Migration
-=================================================
-Merges multiple legacy extract files (different column slices) into a single
-unified file per object, ready for Data Loader import.
-
-Usage:
-    python legacy_file_merger.py <object_name>
-    python legacy_file_merger.py accounts
-    python legacy_file_merger.py contacts
-    python legacy_file_merger.py --all  (processes all objects in config)
-
-Outputs:
-    - output/<object>_merged.csv        → Data Loader ready file
-    - output/<object>_anomaly_report.csv → Duplicates and missing ID flags
-"""
 
 import pandas as pd
 import json
