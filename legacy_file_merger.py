@@ -1,16 +1,15 @@
-
 """
 Legacy File Merger for Salesforce Data Migration
 =================================================
 Merges multiple legacy extract files (different column slices) into a single
 unified file per object, ready for Data Loader import.
- 
+
 Usage:
     python legacy_file_merger.py <object_name>
     python legacy_file_merger.py accounts
     python legacy_file_merger.py contacts
     python legacy_file_merger.py --all  (processes all objects in config)
- 
+
 Outputs:
     - output/<object>_merged.csv        → Data Loader ready file
     - output/<object>_anomaly_report.csv → Duplicates and missing ID flags
@@ -167,12 +166,58 @@ def merge_files(config: dict, id_column: str) -> tuple[pd.DataFrame, pd.DataFram
     # Combine all anomalies (duplicates only - incomplete records go to separate file)
     anomalies_df = pd.concat(all_duplicates, ignore_index=True) if all_duplicates else pd.DataFrame()
     
+    # Build file comparison summary
+    file_comparison = []
+    file_names = list(file_id_sets.keys())
+    for i, file1 in enumerate(file_names):
+        for file2 in file_names[i+1:]:
+            ids_1 = file_id_sets[file1]
+            ids_2 = file_id_sets[file2]
+            only_in_1 = ids_1 - ids_2
+            only_in_2 = ids_2 - ids_1
+            in_both = ids_1 & ids_2
+            
+            file_comparison.append({
+                'file_1': file1,
+                'file_2': file2,
+                'file_1_total': len(ids_1),
+                'file_2_total': len(ids_2),
+                'in_both': len(in_both),
+                'only_in_file_1': len(only_in_1),
+                'only_in_file_2': len(only_in_2),
+            })
+            
+            # Store the actual IDs for detailed reporting
+            for id_val in only_in_1:
+                file_comparison.append({
+                    'file_1': file1,
+                    'file_2': file2,
+                    'id_value': id_val,
+                    'exists_in': file1,
+                    'missing_from': file2
+                })
+            for id_val in only_in_2:
+                file_comparison.append({
+                    'file_1': file1,
+                    'file_2': file2,
+                    'id_value': id_val,
+                    'exists_in': file2,
+                    'missing_from': file1
+                })
+    
+    comparison_df = pd.DataFrame(file_comparison) if file_comparison else pd.DataFrame()
+    
     print(f"\nMerge complete:")
     print(f"  Clean records (in all files): {len(clean_df)}")
     print(f"  Incomplete records (missing from some files): {len(incomplete_df)}")
     print(f"  Duplicates flagged: {len(anomalies_df)}")
     
-    return clean_df, incomplete_df, anomalies_df
+    # Print file comparison summary
+    print(f"\nFile Comparison:")
+    for fname, ids in file_id_sets.items():
+        print(f"  {fname}: {len(ids)} unique IDs")
+    
+    return clean_df, incomplete_df, anomalies_df, comparison_df
 
 
 def process_object(object_name: str, config: dict, output_dir: str = "output"):
@@ -186,7 +231,7 @@ def process_object(object_name: str, config: dict, output_dir: str = "output"):
     print(f"Files: {config['files']}")
     
     # Merge all files
-    clean_df, incomplete_df, duplicates_df = merge_files(config, id_column)
+    clean_df, incomplete_df, duplicates_df, comparison_df = merge_files(config, id_column)
     
     if clean_df.empty and incomplete_df.empty:
         print(f"ERROR: No data merged for {object_name}")
@@ -218,6 +263,13 @@ def process_object(object_name: str, config: dict, output_dir: str = "output"):
         duplicates_df.to_csv(duplicates_path, index=False)
         print(f"✓ Duplicates report saved: {duplicates_path}")
         print(f"  Records: {len(duplicates_df)} (kept first occurrence, these were dropped)")
+    
+    # Save file comparison report
+    if not comparison_df.empty:
+        comparison_path = os.path.join(output_dir, f"{object_name}_file_comparison.csv")
+        comparison_df.to_csv(comparison_path, index=False)
+        print(f"✓ File comparison saved: {comparison_path}")
+        print(f"  Shows which IDs exist in one file but not another")
 
 
 def main():
