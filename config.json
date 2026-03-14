@@ -1,0 +1,24 @@
+{
+    "accounts": {
+        "id_column": "company_id",
+        "files": [
+            "data/accountrpt1.csv",
+            "data/accountrpt2.csv",
+            "data/accountrpt3.csv"
+        ]
+    },
+    "contacts": {
+        "id_column": "user_id",
+        "files": [
+            "data/contactrpt1.csv",
+            "data/contactrpt2.csv"
+        ]
+    },
+    "opportunities": {
+        "id_column": "opportunity_id",
+        "files": [
+            "data/opprpt1.csv",
+            "data/opprpt2.csv"
+        ]
+    }
+}
