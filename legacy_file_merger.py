@@ -32,6 +32,235 @@ def load_config(config_path: str = "config.json") -> dict:
         return json.load(f)
 
 
+# US State mappings
+STATE_ABBREV_TO_FULL = {
+    'AL': 'Alabama', 'AK': 'Alaska', 'AZ': 'Arizona', 'AR': 'Arkansas', 'CA': 'California',
+    'CO': 'Colorado', 'CT': 'Connecticut', 'DE': 'Delaware', 'FL': 'Florida', 'GA': 'Georgia',
+    'HI': 'Hawaii', 'ID': 'Idaho', 'IL': 'Illinois', 'IN': 'Indiana', 'IA': 'Iowa',
+    'KS': 'Kansas', 'KY': 'Kentucky', 'LA': 'Louisiana', 'ME': 'Maine', 'MD': 'Maryland',
+    'MA': 'Massachusetts', 'MI': 'Michigan', 'MN': 'Minnesota', 'MS': 'Mississippi', 'MO': 'Missouri',
+    'MT': 'Montana', 'NE': 'Nebraska', 'NV': 'Nevada', 'NH': 'New Hampshire', 'NJ': 'New Jersey',
+    'NM': 'New Mexico', 'NY': 'New York', 'NC': 'North Carolina', 'ND': 'North Dakota', 'OH': 'Ohio',
+    'OK': 'Oklahoma', 'OR': 'Oregon', 'PA': 'Pennsylvania', 'RI': 'Rhode Island', 'SC': 'South Carolina',
+    'SD': 'South Dakota', 'TN': 'Tennessee', 'TX': 'Texas', 'UT': 'Utah', 'VT': 'Vermont',
+    'VA': 'Virginia', 'WA': 'Washington', 'WV': 'West Virginia', 'WI': 'Wisconsin', 'WY': 'Wyoming',
+    'DC': 'District of Columbia', 'PR': 'Puerto Rico', 'VI': 'Virgin Islands', 'GU': 'Guam'
+}
+STATE_FULL_TO_ABBREV = {v.upper(): k for k, v in STATE_ABBREV_TO_FULL.items()}
+
+
+def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFrame:
+    """Apply data transformations to dataframe."""
+    if not transformations:
+        return df
+    
+    df = df.copy()
+    
+    # 1. Merge columns
+    merge_columns = transformations.get('merge_columns', {})
+    for new_col, source_cols in merge_columns.items():
+        def merge_values(row):
+            values = []
+            for col in source_cols:
+                if col in row and pd.notna(row[col]) and str(row[col]).strip():
+                    values.append(str(row[col]).strip())
+            return ', '.join(values)
+        df[new_col] = df.apply(merge_values, axis=1)
+        print(f"  Merged columns {source_cols} → {new_col}")
+    
+    # 2. Blank if value matches
+    blank_if_value = transformations.get('blank_if_value', {})
+    for col, values_to_blank in blank_if_value.items():
+        if col in df.columns:
+            mask = df[col].isin(values_to_blank)
+            df.loc[mask, col] = ''
+            print(f"  Blanked {mask.sum()} values in '{col}' matching {values_to_blank}")
+    
+    # 3. Blank if all zeros (for postal codes)
+    blank_if_zeros = transformations.get('blank_if_zeros', [])
+    for col in blank_if_zeros:
+        if col in df.columns:
+            def is_all_zeros(val):
+                if pd.isna(val):
+                    return False
+                return str(val).strip().replace('0', '') == ''
+            mask = df[col].apply(is_all_zeros)
+            df.loc[mask, col] = ''
+            print(f"  Blanked {mask.sum()} all-zero values in '{col}'")
+    
+    # 4. State format (abbreviation:full name)
+    state_format = transformations.get('state_format', {})
+    for col, format_type in state_format.items():
+        if col in df.columns:
+            def format_state(val):
+                if pd.isna(val) or str(val).strip() == '':
+                    return ''
+                val_str = str(val).strip()
+                val_upper = val_str.upper()
+                
+                # Check if abbreviation
+                if val_upper in STATE_ABBREV_TO_FULL:
+                    abbrev = val_upper
+                    full = STATE_ABBREV_TO_FULL[abbrev]
+                # Check if full name
+                elif val_upper in STATE_FULL_TO_ABBREV:
+                    abbrev = STATE_FULL_TO_ABBREV[val_upper]
+                    full = STATE_ABBREV_TO_FULL[abbrev]
+                else:
+                    return val_str  # Return original if not recognized
+                
+                return f"{abbrev}:{full}"
+            
+            df[col] = df[col].apply(format_state)
+            print(f"  Formatted state column '{col}' to abbreviation:full")
+    
+    # 5. Congressional district format (STATE:00)
+    congressional_format = transformations.get('congressional_district_format', {})
+    for col, settings in congressional_format.items():
+        if col in df.columns:
+            state_col = settings.get('state_column')
+            pad_zeros = settings.get('pad_zeros', 2)
+            
+            def format_district(row):
+                district_val = row[col]
+                if pd.isna(district_val) or str(district_val).strip() == '':
+                    return ''
+                
+                # Get state abbreviation
+                state_val = row.get(state_col, '') if state_col else ''
+                if pd.isna(state_val) or str(state_val).strip() == '':
+                    return ''
+                
+                state_str = str(state_val).strip().upper()
+                # Extract abbreviation if in format "XX:Full Name"
+                if ':' in state_str:
+                    state_abbrev = state_str.split(':')[0]
+                elif state_str in STATE_ABBREV_TO_FULL:
+                    state_abbrev = state_str
+                elif state_str in STATE_FULL_TO_ABBREV:
+                    state_abbrev = STATE_FULL_TO_ABBREV[state_str]
+                else:
+                    state_abbrev = state_str[:2]  # Fallback: first 2 chars
+                
+                # Format district number with padding
+                try:
+                    district_num = int(float(str(district_val).strip()))
+                    district_str = str(district_num).zfill(pad_zeros)
+                except:
+                    district_str = str(district_val).strip()
+                
+                return f"{state_abbrev}:{district_str}"
+            
+            df[col] = df.apply(format_district, axis=1)
+            print(f"  Formatted congressional district '{col}' using state from '{state_col}'")
+    
+    # 6. Set value (always set column to a specific value)
+    set_value = transformations.get('set_value', {})
+    for col, value in set_value.items():
+        df[col] = value
+        print(f"  Set '{col}' to '{value}' for all rows")
+    
+    # 7. Map value from JSON file
+    map_value = transformations.get('map_value', {})
+    for col, settings in map_value.items():
+        if col not in df.columns:
+            print(f"  WARNING: Column '{col}' not found for map_value")
+            continue
+        
+        mapping_file = settings.get('mapping_file')
+        value_field = settings.get('value_field', 'value')
+        match_type = settings.get('match_type', 'ends_with')
+        delimiter = settings.get('delimiter', ';')
+        
+        if not os.path.exists(mapping_file):
+            print(f"  ERROR: Mapping file not found: {mapping_file}")
+            continue
+        
+        with open(mapping_file, 'r') as f:
+            mapping_data = json.load(f)
+        
+        # Function to map a single value
+        def map_single(input_str):
+            input_str = input_str.strip()
+            if input_str == '':
+                return ''
+            
+            for entry in mapping_data:
+                full_value = entry.get(value_field, '')
+                
+                if match_type == 'ends_with':
+                    if full_value.endswith(f'- {input_str}') or full_value.endswith(f'-{input_str}'):
+                        return full_value
+                elif match_type == 'exact':
+                    if full_value == input_str:
+                        return full_value
+                elif match_type == 'contains':
+                    if input_str in full_value:
+                        return full_value
+            
+            return input_str  # Return original if no match
+        
+        # Function to handle multiple values
+        def map_val(input_val):
+            if pd.isna(input_val) or str(input_val).strip() == '':
+                return ''
+            
+            input_str = str(input_val).strip()
+            
+            # Split by delimiter, map each, rejoin
+            parts = input_str.split(delimiter)
+            mapped_parts = [map_single(p) for p in parts]
+            return delimiter.join(mapped_parts)
+        
+        df[col] = df[col].apply(map_val)
+        print(f"  Mapped values in '{col}' using {mapping_file}")
+    
+    # 8. Replace value (simple find/replace with delimiter support)
+    replace_value = transformations.get('replace_value', {})
+    for col, settings in replace_value.items():
+        if col not in df.columns:
+            print(f"  WARNING: Column '{col}' not found for replace_value")
+            continue
+        
+        replacements = settings.get('mappings', settings)  # Support both formats
+        delimiter = settings.get('delimiter', ';') if isinstance(settings, dict) and 'mappings' in settings else ';'
+        
+        # If settings is just the mappings dict directly
+        if not isinstance(settings, dict) or 'mappings' not in settings:
+            replacements = settings
+        else:
+            replacements = settings.get('mappings', {})
+            delimiter = settings.get('delimiter', ';')
+        
+        def replace_val(input_val):
+            if pd.isna(input_val) or str(input_val).strip() == '':
+                return ''
+            
+            input_str = str(input_val).strip()
+            parts = input_str.split(delimiter)
+            replaced_parts = []
+            
+            for p in parts:
+                p_stripped = p.strip()
+                p_lower = p_stripped.lower()
+                # Check for match (case-insensitive)
+                matched = False
+                for old_val, new_val in replacements.items():
+                    if p_lower == old_val.lower():
+                        replaced_parts.append(new_val)
+                        matched = True
+                        break
+                if not matched:
+                    replaced_parts.append(p_stripped)
+            
+            return delimiter.join(replaced_parts)
+        
+        df[col] = df[col].apply(replace_val)
+        print(f"  Replaced values in '{col}'")
+    
+    return df
+
+
 def process_file(filepath: str, id_column: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Load a single file, dedupe on id_column (keep first), return clean df and duplicates.
@@ -280,18 +509,49 @@ def process_object(object_name: str, config: dict, output_dir: str = "output"):
         print(f"ERROR: No data merged for {object_name}")
         return
     
+    # Apply transformations if defined
+    transformations = config.get('transformations', {})
+    if transformations:
+        print(f"\nApplying transformations...")
+        if not clean_df.empty:
+            clean_df = apply_transformations(clean_df, transformations)
+        if not incomplete_df.empty:
+            incomplete_df = apply_transformations(incomplete_df, transformations)
+    
     # Generate External ID column
     if not clean_df.empty:
-        clean_df['External_ID__c'] = external_id_prefix + '-' + clean_df[id_column].astype(str)
+        if external_id_prefix:
+            clean_df['External_ID__c'] = external_id_prefix + '-' + clean_df[id_column].astype(str)
+        else:
+            clean_df['External_ID__c'] = clean_df[id_column].astype(str)
         # Move External_ID__c to first column
         cols = ['External_ID__c'] + [c for c in clean_df.columns if c != 'External_ID__c']
         clean_df = clean_df[cols]
     
     if not incomplete_df.empty:
-        incomplete_df['External_ID__c'] = external_id_prefix + '-' + incomplete_df[id_column].astype(str)
+        if external_id_prefix:
+            incomplete_df['External_ID__c'] = external_id_prefix + '-' + incomplete_df[id_column].astype(str)
+        else:
+            incomplete_df['External_ID__c'] = incomplete_df[id_column].astype(str)
         # Move External_ID__c to first column (before _missing_from)
         cols = ['External_ID__c'] + [c for c in incomplete_df.columns if c not in ['External_ID__c', '_missing_from']] + ['_missing_from']
         incomplete_df = incomplete_df[cols]
+    
+    # Generate additional external IDs if defined
+    additional_external_ids = config.get('additional_external_ids', {})
+    if additional_external_ids:
+        for field_name, prefix in additional_external_ids.items():
+            if not clean_df.empty:
+                if prefix:
+                    clean_df[field_name] = prefix + '-' + clean_df[id_column].astype(str)
+                else:
+                    clean_df[field_name] = clean_df[id_column].astype(str)
+            if not incomplete_df.empty:
+                if prefix:
+                    incomplete_df[field_name] = prefix + '-' + incomplete_df[id_column].astype(str)
+                else:
+                    incomplete_df[field_name] = incomplete_df[id_column].astype(str)
+        print(f"Generated additional external IDs: {list(additional_external_ids.keys())}")
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
