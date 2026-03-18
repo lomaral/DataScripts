@@ -56,6 +56,28 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
     
     df = df.copy()
     
+    # 0. Filter rows (do this first)
+    filter_rows = transformations.get('filter_rows', {})
+    for col, allowed_values in filter_rows.items():
+        if col not in df.columns:
+            print(f"  WARNING: Filter column '{col}' not found")
+            continue
+        before_count = len(df)
+        df = df[df[col].isin(allowed_values)]
+        print(f"  Filtered '{col}' to {allowed_values}: {before_count} → {len(df)} rows")
+    
+    # 0b. Filter rows exclude (exclude rows containing certain values)
+    filter_rows_exclude = transformations.get('filter_rows_exclude', {})
+    for col, exclude_values in filter_rows_exclude.items():
+        if col not in df.columns:
+            print(f"  WARNING: Filter exclude column '{col}' not found")
+            continue
+        before_count = len(df)
+        # Exclude rows where column contains any of the exclude values
+        mask = df[col].apply(lambda x: not any(str(ev) in str(x) if pd.notna(x) else False for ev in exclude_values))
+        df = df[mask]
+        print(f"  Excluded rows containing {exclude_values} in '{col}': {before_count} → {len(df)} rows")
+    
     # 1. Merge columns
     merge_columns = transformations.get('merge_columns', {})
     for new_col, source_cols in merge_columns.items():
@@ -67,6 +89,103 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
             return ', '.join(values)
         df[new_col] = df.apply(merge_values, axis=1)
         print(f"  Merged columns {source_cols} → {new_col}")
+    
+    # 1b. Concat columns (prefix + columns + suffix)
+    concat_columns = transformations.get('concat_columns', {})
+    for new_col, settings in concat_columns.items():
+        prefix = settings.get('prefix', '')
+        suffix = settings.get('suffix', '')
+        columns = settings.get('columns', [])
+        separator = settings.get('separator', '')
+        
+        def concat_values(row):
+            values = []
+            for col in columns:
+                if col in row and pd.notna(row[col]) and str(row[col]).strip():
+                    values.append(str(row[col]).strip())
+            return prefix + separator.join(values) + suffix
+        
+        df[new_col] = df.apply(concat_values, axis=1)
+        print(f"  Created '{new_col}' = {prefix}{{values}}{suffix}")
+    
+    # 1c. Copy column (copy one column to a new column)
+    copy_column = transformations.get('copy_column', {})
+    for new_col, source_col in copy_column.items():
+        if source_col not in df.columns:
+            print(f"  WARNING: Source column '{source_col}' not found for copy_column")
+            continue
+        df[new_col] = df[source_col]
+        print(f"  Copied '{source_col}' → '{new_col}'")
+    
+    # 1d. Map column (create new column from source column with value mapping)
+    map_column = transformations.get('map_column', {})
+    for new_col, settings in map_column.items():
+        source_col = settings.get('source_column')
+        mappings = settings.get('mappings', {})
+        default = settings.get('default', '')
+        
+        if source_col not in df.columns:
+            print(f"  WARNING: Source column '{source_col}' not found for map_column")
+            continue
+        
+        def do_map(val):
+            if pd.isna(val) or str(val).strip() == '':
+                return default
+            val_str = str(val).strip()
+            # Case-insensitive lookup
+            for k, v in mappings.items():
+                if k.lower() == val_str.lower():
+                    return v
+            return default
+        
+        df[new_col] = df[source_col].apply(do_map)
+        print(f"  Mapped '{source_col}' → '{new_col}'")
+    
+    # 1e. Map column multi (map based on multiple source columns)
+    map_column_multi = transformations.get('map_column_multi', {})
+    for new_col, settings in map_column_multi.items():
+        source_columns = settings.get('source_columns', [])
+        mappings = settings.get('mappings', {})
+        default = settings.get('default', '')
+        
+        # Check all source columns exist
+        missing_cols = [col for col in source_columns if col not in df.columns]
+        if missing_cols:
+            print(f"  WARNING: Source columns {missing_cols} not found for map_column_multi")
+            continue
+        
+        def do_map_multi(row):
+            # Build key from source columns: "value1|value2|..."
+            values = []
+            for col in source_columns:
+                val = row[col]
+                if pd.isna(val):
+                    val = ''
+                values.append(str(val).strip())
+            key = '|'.join(values)
+            key_lower = key.lower()
+            
+            # Try exact match first
+            for k, v in mappings.items():
+                if k.lower() == key_lower:
+                    return v
+            
+            # Try wildcard match (e.g., "Draft|*")
+            for k, v in mappings.items():
+                parts = k.split('|')
+                if len(parts) == len(values):
+                    match = True
+                    for i, part in enumerate(parts):
+                        if part != '*' and part.lower() != values[i].lower():
+                            match = False
+                            break
+                    if match:
+                        return v
+            
+            return default
+        
+        df[new_col] = df.apply(do_map_multi, axis=1)
+        print(f"  Mapped {source_columns} → '{new_col}'")
     
     # 2. Blank if value matches
     blank_if_value = transformations.get('blank_if_value', {})
@@ -257,6 +376,51 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
         
         df[col] = df[col].apply(replace_val)
         print(f"  Replaced values in '{col}'")
+    
+    # 9. Join column from another file
+    join_column = transformations.get('join_column', {})
+    for new_col, settings in join_column.items():
+        from_file = settings.get('from_file')
+        match_column = settings.get('match_column')  # Column in current df
+        match_to = settings.get('match_to')  # Column in other file to match against
+        pull_column = settings.get('pull_column')  # Column in other file to pull
+        
+        if not os.path.exists(from_file):
+            print(f"  ERROR: Join file not found: {from_file}")
+            continue
+        
+        if match_column not in df.columns:
+            print(f"  ERROR: Match column '{match_column}' not found in current file")
+            continue
+        
+        # Read the other file
+        other_df = pd.read_csv(from_file, dtype=str)
+        
+        if match_to not in other_df.columns:
+            print(f"  ERROR: Match to column '{match_to}' not found in {from_file}")
+            continue
+        
+        if pull_column not in other_df.columns:
+            print(f"  ERROR: Pull column '{pull_column}' not found in {from_file}")
+            continue
+        
+        # Build lookup map: match_to -> pull_column
+        join_map = {}
+        for _, row in other_df.iterrows():
+            key = row[match_to]
+            val = row[pull_column]
+            if pd.notna(key) and pd.notna(val):
+                join_map[str(key).strip()] = str(val).strip()
+        
+        # Apply join
+        def do_join(input_val):
+            if pd.isna(input_val) or str(input_val).strip() == '':
+                return ''
+            return join_map.get(str(input_val).strip(), '')
+        
+        df[new_col] = df[match_column].apply(do_join)
+        matched = (df[new_col] != '').sum()
+        print(f"  Joined '{pull_column}' from {from_file} as '{new_col}' ({matched} matched)")
     
     return df
 
