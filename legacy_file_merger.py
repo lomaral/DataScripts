@@ -228,10 +228,10 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
                 else:
                     return val_str  # Return original if not recognized
                 
-                return f"{abbrev}:{full}"
+                return f"{abbrev}: {full}"
             
             df[col] = df[col].apply(format_state)
-            print(f"  Formatted state column '{col}' to abbreviation:full")
+            print(f"  Formatted state column '{col}' to abbreviation: full")
     
     # 5. Congressional district format (STATE:00)
     congressional_format = transformations.get('congressional_district_format', {})
@@ -278,6 +278,24 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
     for col, value in set_value.items():
         df[col] = value
         print(f"  Set '{col}' to '{value}' for all rows")
+    
+    # 6b. Replace text (simple find/replace characters in a column)
+    replace_text = transformations.get('replace_text', {})
+    for col, replacements in replace_text.items():
+        if col not in df.columns:
+            print(f"  WARNING: Column '{col}' not found for replace_text")
+            continue
+        
+        def do_replace(val):
+            if pd.isna(val):
+                return ''
+            val_str = str(val)
+            for old_text, new_text in replacements.items():
+                val_str = val_str.replace(old_text, new_text)
+            return val_str
+        
+        df[col] = df[col].apply(do_replace)
+        print(f"  Replaced text in '{col}': {replacements}")
     
     # 7. Map value from JSON file
     map_value = transformations.get('map_value', {})
