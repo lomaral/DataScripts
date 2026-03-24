@@ -558,6 +558,39 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
         matched = (df[new_col] != '').sum()
         print(f"  Joined '{pull_column}' from {from_file} as '{new_col}' ({matched} matched)")
     
+    # 10. Picklist overflow (if value in list -> picklist field, else -> overflow text field)
+    picklist_overflow = transformations.get('picklist_overflow', {})
+    for picklist_col, settings in picklist_overflow.items():
+        source_column = settings.get('source_column')
+        overflow_column = settings.get('overflow_column')
+        valid_values = settings.get('valid_values', [])
+        other_value = settings.get('other_value', 'Other')
+        
+        if source_column not in df.columns:
+            print(f"  WARNING: Source column '{source_column}' not found for picklist_overflow")
+            continue
+        
+        valid_values_lower = [v.lower() for v in valid_values]
+        
+        def assign_picklist(val):
+            if pd.isna(val) or str(val).strip() == '':
+                return ''
+            if str(val).strip().lower() in valid_values_lower:
+                idx = valid_values_lower.index(str(val).strip().lower())
+                return valid_values[idx]
+            return other_value
+        
+        def assign_overflow(val):
+            if pd.isna(val) or str(val).strip() == '':
+                return ''
+            if str(val).strip().lower() in valid_values_lower:
+                return ''
+            return str(val).strip()
+        
+        df[picklist_col] = df[source_column].apply(assign_picklist)
+        df[overflow_column] = df[source_column].apply(assign_overflow)
+        print(f"  Picklist overflow '{source_column}' → '{picklist_col}' (overflow: '{overflow_column}')")
+    
     return df
 
 
