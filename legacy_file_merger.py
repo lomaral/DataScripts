@@ -107,6 +107,53 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
             df = pd.DataFrame(new_rows)
             print(f"  Split rows on '{source_column}' by '{delimiter}': {before_count} → {len(df)} rows")
     
+    # 0d. Split rows multi (map multiple columns to multiple output values)
+    split_rows_multi = transformations.get('split_rows_multi', {})
+    if split_rows_multi:
+        source_columns = split_rows_multi.get('source_columns', [])
+        output_column = split_rows_multi.get('output_column', 'output')
+        mappings = split_rows_multi.get('mappings', {})
+        
+        missing_cols = [col for col in source_columns if col not in df.columns]
+        if missing_cols:
+            print(f"  WARNING: Source columns {missing_cols} not found for split_rows_multi")
+        else:
+            before_count = len(df)
+            new_rows = []
+            
+            for _, row in df.iterrows():
+                # Build key from source columns
+                key_parts = []
+                for col in source_columns:
+                    val = row[col]
+                    if pd.isna(val):
+                        val = ''
+                    key_parts.append(str(val).strip())
+                key = '|'.join(key_parts)
+                key_lower = key.lower()
+                
+                # Find matching mapping (case-insensitive)
+                output_values = None
+                for map_key, map_values in mappings.items():
+                    if map_key.lower() == key_lower:
+                        output_values = map_values
+                        break
+                
+                if output_values:
+                    # Create one row per output value
+                    for out_val in output_values:
+                        row_copy = row.copy()
+                        row_copy[output_column] = out_val
+                        new_rows.append(row_copy)
+                else:
+                    # No mapping found - keep original row with empty output
+                    row_copy = row.copy()
+                    row_copy[output_column] = ''
+                    new_rows.append(row_copy)
+            
+            df = pd.DataFrame(new_rows)
+            print(f"  Split rows multi on {source_columns}: {before_count} → {len(df)} rows")
+    
     # 1. Merge columns
     merge_columns = transformations.get('merge_columns', {})
     for new_col, source_cols in merge_columns.items():
