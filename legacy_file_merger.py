@@ -78,6 +78,35 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
         df = df[mask]
         print(f"  Excluded rows containing {exclude_values} in '{col}': {before_count} → {len(df)} rows")
     
+    # 0c. Split rows (duplicate rows for values with delimiter)
+    split_rows = transformations.get('split_rows', {})
+    if split_rows:
+        source_column = split_rows.get('source_column')
+        delimiter = split_rows.get('delimiter', '/')
+        output_column = split_rows.get('output_column', source_column)
+        
+        if source_column not in df.columns:
+            print(f"  WARNING: Source column '{source_column}' not found for split_rows")
+        else:
+            before_count = len(df)
+            new_rows = []
+            
+            for _, row in df.iterrows():
+                val = row[source_column]
+                if pd.isna(val) or str(val).strip() == '':
+                    row_copy = row.copy()
+                    row_copy[output_column] = ''
+                    new_rows.append(row_copy)
+                else:
+                    parts = str(val).split(delimiter)
+                    for part in parts:
+                        row_copy = row.copy()
+                        row_copy[output_column] = part.strip()
+                        new_rows.append(row_copy)
+            
+            df = pd.DataFrame(new_rows)
+            print(f"  Split rows on '{source_column}' by '{delimiter}': {before_count} → {len(df)} rows")
+    
     # 1. Merge columns
     merge_columns = transformations.get('merge_columns', {})
     for new_col, source_cols in merge_columns.items():
