@@ -66,6 +66,48 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
         df = df[df[col].isin(allowed_values)]
         print(f"  Filtered '{col}' to {allowed_values}: {before_count} → {len(df)} rows")
     
+    # 0a. Join column early (runs before filter_rows_exclude so you can filter on joined columns)
+    join_column_early = transformations.get('join_column_early', {})
+    for new_col, settings in join_column_early.items():
+        from_file = settings.get('from_file')
+        match_column = settings.get('match_column')
+        match_to = settings.get('match_to')
+        pull_column = settings.get('pull_column')
+        
+        if not os.path.exists(from_file):
+            print(f"  ERROR: Join file not found: {from_file}")
+            continue
+        
+        if match_column not in df.columns:
+            print(f"  ERROR: Match column '{match_column}' not found in current file")
+            continue
+        
+        other_df = pd.read_csv(from_file, dtype=str)
+        
+        if match_to not in other_df.columns:
+            print(f"  ERROR: Match to column '{match_to}' not found in {from_file}")
+            continue
+        
+        if pull_column not in other_df.columns:
+            print(f"  ERROR: Pull column '{pull_column}' not found in {from_file}")
+            continue
+        
+        join_map = {}
+        for _, row in other_df.iterrows():
+            key = row[match_to]
+            val = row[pull_column]
+            if pd.notna(key) and pd.notna(val):
+                join_map[str(key).strip()] = str(val).strip()
+        
+        def do_join(input_val):
+            if pd.isna(input_val) or str(input_val).strip() == '':
+                return ''
+            return join_map.get(str(input_val).strip(), '')
+        
+        df[new_col] = df[match_column].apply(do_join)
+        matched = (df[new_col] != '').sum()
+        print(f"  Joined early '{pull_column}' from {from_file} as '{new_col}' ({matched} matched)")
+    
     # 0b. Filter rows exclude (exclude rows containing certain values)
     filter_rows_exclude = transformations.get('filter_rows_exclude', {})
     for col, exclude_values in filter_rows_exclude.items():
