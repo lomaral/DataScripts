@@ -146,13 +146,28 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
     mapping_cols = mapping_df.columns.tolist()
     legacy_field_col = mapping_cols[0]  # First column = Legacy Field
     reporting_key_col = mapping_cols[1]  # Second column = Reporting Key
-    element_key_col = mapping_cols[2] if len(mapping_cols) > 2 else None  # Third = Element Key
     table_key_col = mapping_cols[3] if len(mapping_cols) > 3 else None  # Fourth = Table Key
     
     print(f"Mapping columns: {mapping_cols}")
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Build mapping lookup: reporting_key -> {legacy_field, table_key}
+    mapping_lookup = {}
+    for _, map_row in mapping_df.iterrows():
+        legacy_field = map_row[legacy_field_col]
+        reporting_key = map_row[reporting_key_col]
+        table_key = map_row[table_key_col] if table_key_col else None
+        
+        if pd.notna(reporting_key) and str(reporting_key).strip() != '':
+            rk = str(reporting_key).strip()
+            mapping_lookup[rk] = {
+                'legacy_field': str(legacy_field).strip() if pd.notna(legacy_field) else '',
+                'table_key': str(table_key).strip() if pd.notna(table_key) and str(table_key).strip() != '' else None
+            }
+    
+    print(f"Mapping lookup built: {len(mapping_lookup)} entries")
     
     # Process each record in data file
     for idx, data_row in data_df.iterrows():
@@ -162,32 +177,30 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
         # Copy template
         filled_df = template_df.copy()
         
-        # Build reporting key index for template
-        reporting_key_index = {}
-        if 'EGMS_HF_Reporting_Key__c' in filled_df.columns:
-            for t_idx, t_row in filled_df.iterrows():
-                rk = t_row.get('EGMS_HF_Reporting_Key__c', '')
-                if pd.notna(rk) and str(rk).strip() != '':
-                    reporting_key_index[str(rk).strip()] = t_idx
-        
         # Track filled fields
         filled_count = 0
         table_count = 0
         
-        # Process each mapping row
-        for _, map_row in mapping_df.iterrows():
-            legacy_field = map_row[legacy_field_col]
-            reporting_key = map_row[reporting_key_col]
-            table_key = map_row[table_key_col] if table_key_col else None
-            
-            # Skip if no legacy field or reporting key
-            if pd.isna(legacy_field) or pd.isna(reporting_key):
+        # Loop through each template row
+        for t_idx, t_row in filled_df.iterrows():
+            # Get reporting key from template
+            reporting_key = t_row.get('EGMS_HF_Reporting_Key__c', '')
+            if pd.isna(reporting_key) or str(reporting_key).strip() == '':
                 continue
             
-            legacy_field = str(legacy_field).strip()
-            reporting_key = str(reporting_key).strip()
+            rk = str(reporting_key).strip()
             
-            # Get value from data
+            # Look up reporting key in mapping
+            if rk not in mapping_lookup:
+                continue
+            
+            legacy_field = mapping_lookup[rk]['legacy_field']
+            table_key = mapping_lookup[rk]['table_key']
+            
+            if not legacy_field:
+                continue
+            
+            # Get value from data file using legacy field name
             if legacy_field not in data_row.index:
                 continue
             
@@ -195,27 +208,20 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
             if pd.isna(value) or str(value).strip() == '':
                 continue
             
-            # Find template row by reporting key
-            if reporting_key not in reporting_key_index:
-                continue
-            
-            template_idx = reporting_key_index[reporting_key]
-            
             # Check if table field
-            if table_key and pd.notna(table_key) and str(table_key).strip() != '':
-                table_key = str(table_key).strip()
+            if table_key:
                 # Table field - update complex value JSON
                 complex_col = 'EGMS_HF_Complex_Value__c'
                 if complex_col in filled_df.columns:
-                    current_value = filled_df.at[template_idx, complex_col]
+                    current_value = filled_df.at[t_idx, complex_col]
                     new_value = fill_table_value(current_value, table_key, value)
-                    filled_df.at[template_idx, complex_col] = new_value
+                    filled_df.at[t_idx, complex_col] = new_value
                     table_count += 1
             else:
-                # Regular field - detect column and insert
-                value_col = detect_value_column(filled_df.iloc[template_idx])
+                # Regular field - detect value column and insert
+                value_col = detect_value_column(t_row)
                 formatted_value = format_value(value, value_col)
-                filled_df.at[template_idx, value_col] = formatted_value
+                filled_df.at[t_idx, value_col] = formatted_value
                 filled_count += 1
         
         print(f"    Filled {filled_count} fields, {table_count} table values")
