@@ -176,20 +176,23 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
         # Copy template
         filled_df = template_df.copy()
         
-        # Build mapping lookup: reporting_key -> {legacy_field, table_row, table_column, data_type_value}
+        # Build mapping lookup: reporting_key -> list of {legacy_field, table_row, table_column, data_type_value}
         mapping_lookup = {}
         for _, map_row in mapping_df.iterrows():
             rk = map_row[reporting_key_col]
             if pd.notna(rk) and str(rk).strip() != '':
                 rk_str = str(rk).strip()
-                mapping_lookup[rk_str] = {
+                entry = {
                     'legacy_field': str(map_row[legacy_field_col]).strip() if pd.notna(map_row[legacy_field_col]) else '',
                     'table_row': str(map_row[table_row_col]).strip() if table_row_col and pd.notna(map_row[table_row_col]) and str(map_row[table_row_col]).strip() != '' else None,
                     'table_column': str(map_row[table_col_col]).strip() if table_col_col and pd.notna(map_row[table_col_col]) and str(map_row[table_col_col]).strip() != '' else None,
                     'data_type_value': str(map_row[data_type_col]).strip() if data_type_col and pd.notna(map_row[data_type_col]) and str(map_row[data_type_col]).strip() != '' else None
                 }
+                if rk_str not in mapping_lookup:
+                    mapping_lookup[rk_str] = []
+                mapping_lookup[rk_str].append(entry)
         
-        print(f"    Mapping lookup: {len(mapping_lookup)} entries")
+        print(f"    Mapping lookup: {len(mapping_lookup)} unique reporting keys")
         
         # Track filled fields
         filled_count = 0
@@ -204,60 +207,51 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
             
             rk = str(reporting_key).strip()
             
-            # DEBUG
-            print(f"    Template RK: '{rk}'")
-            
             # Look up in mapping
             if rk not in mapping_lookup:
-                print(f"      SKIP: not in mapping")
                 continue
             
-            legacy_field = mapping_lookup[rk]['legacy_field']
-            table_row = mapping_lookup[rk]['table_row']
-            table_column = mapping_lookup[rk]['table_column']
-            data_type_value = mapping_lookup[rk]['data_type_value']
-            
-            print(f"      Legacy field: '{legacy_field}'")
-            
-            if not legacy_field:
-                print(f"      SKIP: no legacy field")
-                continue
-            
-            # Get value from data file
-            if legacy_field not in data_row.index:
-                print(f"      SKIP: legacy field not in data columns")
-                continue
-            
-            value = data_row[legacy_field]
-            if pd.isna(value) or str(value).strip() == '':
-                print(f"      SKIP: no value in data")
-                continue
-            
-            print(f"      Value: '{value}'")
-            
-            # Check if table field (has both table_row and table_column)
-            if table_row and table_column:
-                # Table field - update complex value JSON
-                complex_col = 'EGMS_HF_Complex_Value__c'
-                if complex_col in filled_df.columns:
-                    current_value = filled_df.at[t_idx, complex_col]
-                    new_value = fill_table_value(current_value, table_row, table_column, value)
-                    filled_df.at[t_idx, complex_col] = new_value
-                    table_count += 1
-                    print(f"      INSERTED table value: row='{table_row}', col='{table_column}'")
-            else:
-                # Use data_type_value from mapping column E if available, otherwise detect
-                if data_type_value:
-                    value_col = data_type_value
+            # Loop through ALL entries for this reporting key
+            for entry in mapping_lookup[rk]:
+                legacy_field = entry['legacy_field']
+                table_row = entry['table_row']
+                table_column = entry['table_column']
+                data_type_value = entry['data_type_value']
+                
+                if not legacy_field:
+                    continue
+                
+                # Get value from data file
+                if legacy_field not in data_row.index:
+                    continue
+                
+                value = data_row[legacy_field]
+                if pd.isna(value) or str(value).strip() == '':
+                    continue
+                
+                # Check if table field (has both table_row and table_column)
+                if table_row and table_column:
+                    # Table field - update complex value JSON
+                    complex_col = 'EGMS_HF_Complex_Value__c'
+                    if complex_col in filled_df.columns:
+                        current_value = filled_df.at[t_idx, complex_col]
+                        print(f"      Table row: '{table_row}', Table col: '{table_column}'")
+                        print(f"      Current JSON: {current_value[:200] if current_value else 'EMPTY'}...")
+                        new_value = fill_table_value(current_value, table_row, table_column, value)
+                        print(f"      New JSON: {new_value[:200] if new_value else 'EMPTY'}...")
+                        filled_df.at[t_idx, complex_col] = new_value
+                        table_count += 1
+                        print(f"      INSERTED table value")
                 else:
-                    value_col = detect_value_column(t_row)
-                
-                print(f"      Inserting into: '{value_col}'")
-                
-                formatted_value = format_value(value, value_col)
-                filled_df.at[t_idx, value_col] = formatted_value
-                filled_count += 1
-                print(f"      INSERTED: '{formatted_value}'")
+                    # Use data_type_value from mapping column E if available, otherwise detect
+                    if data_type_value:
+                        value_col = data_type_value
+                    else:
+                        value_col = detect_value_column(t_row)
+                    
+                    formatted_value = format_value(value, value_col)
+                    filled_df.at[t_idx, value_col] = formatted_value
+                    filled_count += 1
         
         print(f"    Filled {filled_count} fields, {table_count} table values")
         
