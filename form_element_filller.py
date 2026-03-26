@@ -84,8 +84,15 @@ def format_value(value, column_name: str):
     return val_str
 
 
-def fill_table_value(complex_value: str, table_key: str, new_value) -> str:
-    """Fill a value in a table (JSON array in complex value)."""
+def fill_table_value(complex_value: str, table_row: str, table_column: str, new_value) -> str:
+    """Fill a value in a table (JSON array in complex value).
+    
+    Args:
+        complex_value: The JSON string from EGMS_HF_Complex_Value__c
+        table_row: Row identifier (e.g., 'ROW_1' or matches elementTemplateKey)
+        table_column: Column key to update (e.g., 'AmountOfFunds')
+        new_value: Value to insert
+    """
     if pd.isna(new_value) or str(new_value).strip() == '':
         return complex_value
     
@@ -99,10 +106,14 @@ def fill_table_value(complex_value: str, table_key: str, new_value) -> str:
         if not isinstance(data, list):
             return complex_value
         
-        # Find and update the key in all rows
+        # Find the row and update the column
         for row in data:
-            if isinstance(row, dict) and table_key in row:
-                row[table_key] = str(new_value).strip()
+            if isinstance(row, dict):
+                # Check if this row matches by elementTemplateKey containing table_row
+                element_key = row.get('elementTemplateKey', '')
+                if table_row in element_key:
+                    row[table_column] = str(new_value).strip()
+                    break
         
         return json.dumps(data)
     
@@ -144,11 +155,13 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
     
     # Get column names from mapping
     mapping_cols = mapping_df.columns.tolist()
-    legacy_field_col = mapping_cols[0]  # First column = Legacy Field
-    reporting_key_col = mapping_cols[1]  # Second column = Reporting Key
-    element_key_col = mapping_cols[2] if len(mapping_cols) > 2 else None  # Third = Element Key
-    table_key_col = mapping_cols[3] if len(mapping_cols) > 3 else None  # Fourth = Table Key
-    data_type_col = mapping_cols[4] if len(mapping_cols) > 4 else None  # Fifth = Data Type Value (column to insert into)
+    legacy_field_col = mapping_cols[0]  # A = Legacy Field
+    reporting_key_col = mapping_cols[1]  # B = Reporting Key
+    element_key_col = mapping_cols[2] if len(mapping_cols) > 2 else None  # C = Element Key
+    upsert_key_col = mapping_cols[3] if len(mapping_cols) > 3 else None  # D = Upsert Key
+    data_type_col = mapping_cols[4] if len(mapping_cols) > 4 else None  # E = Data Type Value
+    table_row_col = mapping_cols[5] if len(mapping_cols) > 5 else None  # F = Table Row
+    table_col_col = mapping_cols[6] if len(mapping_cols) > 6 else None  # G = Table Column
     
     print(f"Mapping columns: {mapping_cols}")
     
@@ -163,7 +176,7 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
         # Copy template
         filled_df = template_df.copy()
         
-        # Build mapping lookup: reporting_key -> {legacy_field, table_key, data_type_value}
+        # Build mapping lookup: reporting_key -> {legacy_field, table_row, table_column, data_type_value}
         mapping_lookup = {}
         for _, map_row in mapping_df.iterrows():
             rk = map_row[reporting_key_col]
@@ -171,7 +184,8 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
                 rk_str = str(rk).strip()
                 mapping_lookup[rk_str] = {
                     'legacy_field': str(map_row[legacy_field_col]).strip() if pd.notna(map_row[legacy_field_col]) else '',
-                    'table_key': str(map_row[table_key_col]).strip() if table_key_col and pd.notna(map_row[table_key_col]) and str(map_row[table_key_col]).strip() != '' else None,
+                    'table_row': str(map_row[table_row_col]).strip() if table_row_col and pd.notna(map_row[table_row_col]) and str(map_row[table_row_col]).strip() != '' else None,
+                    'table_column': str(map_row[table_col_col]).strip() if table_col_col and pd.notna(map_row[table_col_col]) and str(map_row[table_col_col]).strip() != '' else None,
                     'data_type_value': str(map_row[data_type_col]).strip() if data_type_col and pd.notna(map_row[data_type_col]) and str(map_row[data_type_col]).strip() != '' else None
                 }
         
@@ -199,7 +213,8 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
                 continue
             
             legacy_field = mapping_lookup[rk]['legacy_field']
-            table_key = mapping_lookup[rk]['table_key']
+            table_row = mapping_lookup[rk]['table_row']
+            table_column = mapping_lookup[rk]['table_column']
             data_type_value = mapping_lookup[rk]['data_type_value']
             
             print(f"      Legacy field: '{legacy_field}'")
@@ -220,16 +235,16 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
             
             print(f"      Value: '{value}'")
             
-            # Check if table field
-            if table_key:
+            # Check if table field (has both table_row and table_column)
+            if table_row and table_column:
                 # Table field - update complex value JSON
                 complex_col = 'EGMS_HF_Complex_Value__c'
                 if complex_col in filled_df.columns:
                     current_value = filled_df.at[t_idx, complex_col]
-                    new_value = fill_table_value(current_value, table_key, value)
+                    new_value = fill_table_value(current_value, table_row, table_column, value)
                     filled_df.at[t_idx, complex_col] = new_value
                     table_count += 1
-                    print(f"      INSERTED table value")
+                    print(f"      INSERTED table value: row='{table_row}', col='{table_column}'")
             else:
                 # Use data_type_value from mapping column E if available, otherwise detect
                 if data_type_value:
