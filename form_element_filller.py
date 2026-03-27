@@ -4,14 +4,11 @@ Form Element Filler for Salesforce Data Migration
 Fills form element templates with legacy data values.
 
 Usage:
-    python form_element_filler.py <form_name>
-    python form_element_filler.py ssvf_renewal
-    python form_element_filler.py --all
+    python form_element_filler.py
 
 Inputs:
-    - templates/ folder with SF export templates
-    - mappings/ folder with legacy-to-SF field mappings
-    - output/ folder with merged legacy data
+    - form_config.json with templates, mappings, name_mapping
+    - data file with Id and Name columns
 
 Output:
     - application_form/ folder with filled templates (one per record)
@@ -122,61 +119,127 @@ def fill_table_value(complex_value: str, table_row: str, table_column: str, new_
         return complex_value
 
 
-def process_form(form_name: str, config: dict, output_dir: str = "application_form"):
-    """Process a single form: fill template with data."""
+def update_upsert_key(upsert_key: str, new_form_id: str) -> str:
+    """Replace the form ID part of the upsert key with new_form_id.
+    
+    Format: OLD_FORM_ID_ELEMENT_xxxxx -> NEW_FORM_ID_ELEMENT_xxxxx
+    """
+    if pd.isna(upsert_key) or not upsert_key:
+        return upsert_key
+    
+    upsert_str = str(upsert_key).strip()
+    
+    # Find _ELEMENT_ and replace everything before it
+    if '_ELEMENT_' in upsert_str:
+        element_part = upsert_str.split('_ELEMENT_', 1)[1]
+        return f"{new_form_id}_ELEMENT_{element_part}"
+    
+    return upsert_str
+
+
+def process_all_forms(config: dict, output_dir: str = "application_form"):
+    """Process all records, selecting template based on Name column."""
     print(f"\n{'='*60}")
-    print(f"Processing: {form_name.upper()}")
+    print(f"Processing Form Elements")
     print(f"{'='*60}")
     
-    template_path = config['template']
-    mapping_path = config['mapping']
     data_path = config['data_file']
-    id_column = config.get('id_column', 'External_ID__c')
+    name_column = config.get('name_column', 'Name')
+    id_column = config.get('id_column', 'Id')
+    name_mapping = config.get('name_mapping', {})
+    templates = config.get('templates', {})
     
-    # Check files exist
-    if not os.path.exists(template_path):
-        print(f"ERROR: Template not found: {template_path}")
-        return
-    if not os.path.exists(mapping_path):
-        print(f"ERROR: Mapping not found: {mapping_path}")
-        return
+    # Check data file exists
     if not os.path.exists(data_path):
         print(f"ERROR: Data file not found: {data_path}")
         return
     
-    # Load files
-    template_df = pd.read_csv(template_path, dtype=str)
-    mapping_df = pd.read_csv(mapping_path, dtype=str)
+    # Load data file
     data_df = pd.read_csv(data_path, dtype=str)
-    
-    print(f"Template: {len(template_df)} rows")
-    print(f"Mapping: {len(mapping_df)} fields")
-    print(f"Data: {len(data_df)} records")
-    
-    # Get column names from mapping
-    mapping_cols = mapping_df.columns.tolist()
-    legacy_field_col = mapping_cols[0]  # A = Legacy Field
-    reporting_key_col = mapping_cols[1]  # B = Reporting Key
-    element_key_col = mapping_cols[2] if len(mapping_cols) > 2 else None  # C = Element Key
-    upsert_key_col = mapping_cols[3] if len(mapping_cols) > 3 else None  # D = Upsert Key
-    data_type_col = mapping_cols[4] if len(mapping_cols) > 4 else None  # E = Data Type Value
-    table_row_col = mapping_cols[5] if len(mapping_cols) > 5 else None  # F = Table Row
-    table_col_col = mapping_cols[6] if len(mapping_cols) > 6 else None  # G = Table Column
-    
-    print(f"Mapping columns: {mapping_cols}")
+    print(f"Data file: {len(data_df)} records")
+    print(f"Name column: {name_column}")
+    print(f"Id column: {id_column}")
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Process each record in data file
+    # Track stats
+    processed = 0
+    skipped = 0
+    
+    # Process each record
     for idx, data_row in data_df.iterrows():
-        record_id = data_row.get(id_column, f"record_{idx}")
-        print(f"\n  Processing record: {record_id}")
+        # Get Name and Id
+        name_value = data_row.get(name_column, '')
+        form_id = data_row.get(id_column, '')
+        
+        if pd.isna(name_value) or str(name_value).strip() == '':
+            print(f"  SKIP row {idx}: No Name")
+            skipped += 1
+            continue
+        
+        if pd.isna(form_id) or str(form_id).strip() == '':
+            print(f"  SKIP row {idx}: No Id")
+            skipped += 1
+            continue
+        
+        name_value = str(name_value).strip()
+        form_id = str(form_id).strip()
+        
+        # Map Name to template name
+        template_name = name_mapping.get(name_value)
+        if not template_name:
+            print(f"  SKIP row {idx}: No template mapping for '{name_value}'")
+            skipped += 1
+            continue
+        
+        # Get template config
+        if template_name not in templates:
+            print(f"  SKIP row {idx}: Template '{template_name}' not found in config")
+            skipped += 1
+            continue
+        
+        template_config = templates[template_name]
+        template_path = template_config['template']
+        mapping_path = template_config['mapping']
+        
+        # Check files exist
+        if not os.path.exists(template_path):
+            print(f"  SKIP row {idx}: Template file not found: {template_path}")
+            skipped += 1
+            continue
+        if not os.path.exists(mapping_path):
+            print(f"  SKIP row {idx}: Mapping file not found: {mapping_path}")
+            skipped += 1
+            continue
+        
+        print(f"\n  Processing: {form_id} ({name_value} -> {template_name})")
+        
+        # Load template and mapping
+        template_df = pd.read_csv(template_path, dtype=str)
+        mapping_df = pd.read_csv(mapping_path, dtype=str)
+        
+        # Get column names from mapping
+        mapping_cols = mapping_df.columns.tolist()
+        legacy_field_col = mapping_cols[0]  # A = Legacy Field
+        reporting_key_col = mapping_cols[1]  # B = Reporting Key
+        element_key_col = mapping_cols[2] if len(mapping_cols) > 2 else None  # C = Element Key
+        upsert_key_col = mapping_cols[3] if len(mapping_cols) > 3 else None  # D = Upsert Key
+        data_type_col = mapping_cols[4] if len(mapping_cols) > 4 else None  # E = Data Type Value
+        table_row_col = mapping_cols[5] if len(mapping_cols) > 5 else None  # F = Table Row
+        table_col_col = mapping_cols[6] if len(mapping_cols) > 6 else None  # G = Table Column
         
         # Copy template
         filled_df = template_df.copy()
         
-        # Build mapping lookup: reporting_key -> list of {legacy_field, table_row, table_column, data_type_value}
+        # Update ALL upsert keys with the form Id
+        if 'EGMS_HF_Element_Upsert_Key__c' in filled_df.columns:
+            filled_df['EGMS_HF_Element_Upsert_Key__c'] = filled_df['EGMS_HF_Element_Upsert_Key__c'].apply(
+                lambda x: update_upsert_key(x, form_id)
+            )
+            print(f"    Updated upsert keys with Id: {form_id}")
+        
+        # Build mapping lookup: reporting_key -> list of entries
         mapping_lookup = {}
         for _, map_row in mapping_df.iterrows():
             rk = map_row[reporting_key_col]
@@ -191,8 +254,6 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
                 if rk_str not in mapping_lookup:
                     mapping_lookup[rk_str] = []
                 mapping_lookup[rk_str].append(entry)
-        
-        print(f"    Mapping lookup: {len(mapping_lookup)} unique reporting keys")
         
         # Track filled fields
         filled_count = 0
@@ -235,13 +296,9 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
                     complex_col = 'EGMS_HF_Complex_Value__c'
                     if complex_col in filled_df.columns:
                         current_value = filled_df.at[t_idx, complex_col]
-                        print(f"      Table row: '{table_row}', Table col: '{table_column}'")
-                        print(f"      Current JSON: {current_value[:200] if current_value else 'EMPTY'}...")
                         new_value = fill_table_value(current_value, table_row, table_column, value)
-                        print(f"      New JSON: {new_value[:200] if new_value else 'EMPTY'}...")
                         filled_df.at[t_idx, complex_col] = new_value
                         table_count += 1
-                        print(f"      INSERTED table value")
                 else:
                     # Use data_type_value from mapping column E if available, otherwise detect
                     if data_type_value:
@@ -256,32 +313,20 @@ def process_form(form_name: str, config: dict, output_dir: str = "application_fo
         print(f"    Filled {filled_count} fields, {table_count} table values")
         
         # Save filled template
-        safe_id = re.sub(r'[^\w\-]', '_', str(record_id))
-        output_path = os.path.join(output_dir, f"{form_name}_{safe_id}.csv")
+        safe_id = re.sub(r'[^\w\-]', '_', form_id)
+        output_path = os.path.join(output_dir, f"{safe_id}.csv")
         filled_df.to_csv(output_path, index=False)
         print(f"    Saved: {output_path}")
+        processed += 1
     
-    print(f"\nCompleted {form_name}: {len(data_df)} files created")
+    print(f"\n{'='*60}")
+    print(f"Completed: {processed} processed, {skipped} skipped")
+    print(f"{'='*60}")
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python form_element_filler.py <form_name>")
-        print("       python form_element_filler.py --all")
-        sys.exit(1)
-    
     config = load_config()
-    
-    if sys.argv[1] == '--all':
-        for form_name in config.keys():
-            process_form(form_name, config[form_name])
-    else:
-        form_name = sys.argv[1].lower().replace(' ', '_')
-        if form_name not in config:
-            print(f"ERROR: Form '{form_name}' not found in config")
-            print(f"Available forms: {list(config.keys())}")
-            sys.exit(1)
-        process_form(form_name, config[form_name])
+    process_all_forms(config)
 
 
 if __name__ == "__main__":
