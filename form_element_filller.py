@@ -146,7 +146,6 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
     data_path = config['data_file']
     name_column = config.get('name_column', 'Name')
     id_column = config.get('id_column', 'Id')
-    name_mapping = config.get('name_mapping', {})
     templates = config.get('templates', {})
     
     # Check data file exists
@@ -166,6 +165,7 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
     # Track stats
     processed = 0
     skipped = 0
+    all_filled_dfs = []
     
     # Process each record
     for idx, data_row in data_df.iterrows():
@@ -186,20 +186,13 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
         name_value = str(name_value).strip()
         form_id = str(form_id).strip()
         
-        # Map Name to template name
-        template_name = name_mapping.get(name_value)
-        if not template_name:
-            print(f"  SKIP row {idx}: No template mapping for '{name_value}'")
+        # Get template config directly from Name
+        if name_value not in templates:
+            print(f"  SKIP row {idx}: No template for '{name_value}'")
             skipped += 1
             continue
         
-        # Get template config
-        if template_name not in templates:
-            print(f"  SKIP row {idx}: Template '{template_name}' not found in config")
-            skipped += 1
-            continue
-        
-        template_config = templates[template_name]
+        template_config = templates[name_value]
         template_path = template_config['template']
         mapping_path = template_config['mapping']
         
@@ -213,7 +206,7 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
             skipped += 1
             continue
         
-        print(f"\n  Processing: {form_id} ({name_value} -> {template_name})")
+        print(f"\n  Processing: {form_id} ({name_value})")
         
         # Load template and mapping
         template_df = pd.read_csv(template_path, dtype=str)
@@ -312,12 +305,22 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
         
         print(f"    Filled {filled_count} fields, {table_count} table values")
         
-        # Save filled template
-        safe_id = re.sub(r'[^\w\-]', '_', form_id)
-        output_path = os.path.join(output_dir, f"{safe_id}.csv")
-        filled_df.to_csv(output_path, index=False)
-        print(f"    Saved: {output_path}")
+        # Append to combined output
+        all_filled_dfs.append(filled_df)
         processed += 1
+    
+    # Save all to one file
+    if all_filled_dfs:
+        combined_df = pd.concat(all_filled_dfs, ignore_index=True)
+        
+        # Keep only upsert key, reporting key, and value columns
+        keep_columns = ['EGMS_HF_Element_Upsert_Key__c', 'EGMS_HF_Reporting_Key__c'] + VALUE_COLUMNS
+        keep_columns = [col for col in keep_columns if col in combined_df.columns]
+        combined_df = combined_df[keep_columns]
+        
+        output_path = os.path.join(output_dir, "form_elements_import.csv")
+        combined_df.to_csv(output_path, index=False)
+        print(f"\n  Saved combined file: {output_path} ({len(combined_df)} rows)")
     
     print(f"\n{'='*60}")
     print(f"Completed: {processed} processed, {skipped} skipped")
