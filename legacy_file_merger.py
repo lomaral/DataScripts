@@ -325,15 +325,80 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
             df.loc[mask, col] = ''
             print(f"  Blanked {mask.sum()} all-zero values in '{col}'")
     
+    # 3.5 VISN State Combine - combine state prefixes with VISN values, keep only valid combinations
+    # Runs BEFORE state_format so it can use raw state abbreviations
+    visn_state_combine = transformations.get('visn_state_combine', {})
+    if visn_state_combine:
+        visn_column = visn_state_combine.get('visn_column')
+        state_column = visn_state_combine.get('state_column')
+        output_column = visn_state_combine.get('output_column', visn_column)
+        delimiter = visn_state_combine.get('delimiter', ';')
+        output_delimiter = visn_state_combine.get('output_delimiter', ', ')
+        valid_combinations = visn_state_combine.get('valid_combinations', {})
+        
+        if visn_column not in df.columns:
+            print(f"  WARNING: VISN column '{visn_column}' not found for visn_state_combine")
+        elif state_column not in df.columns:
+            print(f"  WARNING: State column '{state_column}' not found for visn_state_combine")
+        else:
+            # Build lookup for faster matching (lowercase keys)
+            valid_lower = {k.lower(): k for k in valid_combinations.keys()}
+            
+            def combine_visn_state(row):
+                visn_val = row[visn_column]
+                state_val = row[state_column]
+                
+                if pd.isna(visn_val) or str(visn_val).strip() == '':
+                    return ''
+                if pd.isna(state_val) or str(state_val).strip() == '':
+                    return str(visn_val).strip()
+                
+                # Split by delimiter
+                visns = [v.strip() for v in str(visn_val).split(delimiter) if v.strip()]
+                states = [s.strip() for s in str(state_val).split(delimiter) if s.strip()]
+                
+                # Try all combinations
+                matches = []
+                for state in states:
+                    for visn in visns:
+                        combo = f"{state} - {visn}"
+                        combo_lower = combo.lower()
+                        if combo_lower in valid_lower:
+                            # Use the properly cased version from config
+                            matches.append(valid_lower[combo_lower])
+                
+                if matches:
+                    # Remove duplicates while preserving order
+                    seen = set()
+                    unique_matches = []
+                    for m in matches:
+                        if m not in seen:
+                            seen.add(m)
+                            unique_matches.append(m)
+                    return output_delimiter.join(unique_matches)
+                else:
+                    # No valid combinations found, return original
+                    return str(visn_val).strip()
+            
+            df[output_column] = df.apply(combine_visn_state, axis=1)
+            print(f"  VISN State Combine: '{visn_column}' + '{state_column}' → '{output_column}' ({len(valid_combinations)} valid combinations)")
+    
     # 4. State format (abbreviation:full name)
     state_format = transformations.get('state_format', {})
-    for col, format_type in state_format.items():
+    for col, settings in state_format.items():
         if col in df.columns:
-            def format_state(val):
-                if pd.isna(val) or str(val).strip() == '':
-                    return ''
-                val_str = str(val).strip()
-                val_upper = val_str.upper()
+            # Support both old format (just column name) and new format (dict with options)
+            if isinstance(settings, dict):
+                delimiter = settings.get('delimiter', None)
+                output_delimiter = settings.get('output_delimiter', delimiter)
+                separator = settings.get('separator', ': ')
+            else:
+                delimiter = None
+                output_delimiter = None
+                separator = ': '
+            
+            def format_single_state(val_str, sep=separator):
+                val_upper = val_str.strip().upper()
                 
                 # Check if abbreviation
                 if val_upper in STATE_ABBREV_TO_FULL:
@@ -344,12 +409,25 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
                     abbrev = STATE_FULL_TO_ABBREV[val_upper]
                     full = STATE_ABBREV_TO_FULL[abbrev]
                 else:
-                    return val_str  # Return original if not recognized
+                    return val_str.strip()  # Return original if not recognized
                 
-                return f"{abbrev}: {full}"
+                return f"{abbrev}{sep}{full}"
+            
+            def format_state(val):
+                if pd.isna(val) or str(val).strip() == '':
+                    return ''
+                val_str = str(val).strip()
+                
+                if delimiter:
+                    # Split by delimiter, format each, rejoin
+                    parts = [p.strip() for p in val_str.split(delimiter) if p.strip()]
+                    formatted = [format_single_state(p) for p in parts]
+                    return output_delimiter.join(formatted)
+                else:
+                    return format_single_state(val_str)
             
             df[col] = df[col].apply(format_state)
-            print(f"  Formatted state column '{col}' to abbreviation: full")
+            print(f"  Formatted state column '{col}' with separator '{separator}'")
     
     # 5. Congressional district format (STATE:00)
     congressional_format = transformations.get('congressional_district_format', {})
@@ -590,6 +668,36 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
         df[picklist_col] = df[source_column].apply(assign_picklist)
         df[overflow_column] = df[source_column].apply(assign_overflow)
         print(f"  Picklist overflow '{source_column}' → '{picklist_col}' (overflow: '{overflow_column}')")
+    
+    # 11. Extract digits - extract first N digits from each value in a delimited list
+    extract_digits = transformations.get('extract_digits', {})
+    for col, settings in extract_digits.items():
+        if col not in df.columns:
+            print(f"  WARNING: Column '{col}' not found for extract_digits")
+            continue
+        
+        num_digits = settings.get('digits', 3)
+        delimiter = settings.get('delimiter', ';')
+        output_delimiter = settings.get('output_delimiter', ';')
+        
+        def extract_n_digits(val):
+            if pd.isna(val) or str(val).strip() == '':
+                return ''
+            
+            # Split by delimiter
+            parts = [p.strip() for p in str(val).split(delimiter) if p.strip()]
+            
+            extracted = []
+            for part in parts:
+                # Extract first N digits from each part
+                digits = ''.join(c for c in part if c.isdigit())
+                if digits:
+                    extracted.append(digits[:num_digits])
+            
+            return output_delimiter.join(extracted)
+        
+        df[col] = df[col].apply(extract_n_digits)
+        print(f"  Extract digits: '{col}' → first {num_digits} digits")
     
     return df
 
