@@ -400,6 +400,10 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
             def format_single_state(val_str, sep=separator):
                 val_upper = val_str.strip().upper()
                 
+                # Special handling for non-standard codes
+                if val_upper == 'UVI':
+                    return f"VI{sep}Virgin Islands"
+                
                 # Check if abbreviation
                 if val_upper in STATE_ABBREV_TO_FULL:
                     abbrev = val_upper
@@ -428,6 +432,49 @@ def apply_transformations(df: pd.DataFrame, transformations: dict) -> pd.DataFra
             
             df[col] = df[col].apply(format_state)
             print(f"  Formatted state column '{col}' with separator '{separator}'")
+    
+    # 4.5 County format - "Adams County (CO)" -> "CO - Adams County"
+    county_format = transformations.get('county_format', {})
+    for col, settings in county_format.items():
+        if col not in df.columns:
+            print(f"  WARNING: Column '{col}' not found for county_format")
+            continue
+        
+        if isinstance(settings, dict):
+            delimiter = settings.get('delimiter', None)
+            output_delimiter = settings.get('output_delimiter', delimiter)
+            separator = settings.get('separator', ' - ')
+        else:
+            delimiter = None
+            output_delimiter = None
+            separator = ' - '
+        
+        import re
+        
+        def format_single_county(val_str, sep=separator):
+            val_str = val_str.strip()
+            # Match pattern: "County Name (ST)" or "County Name(ST)"
+            match = re.match(r'^(.+?)\s*\(([A-Za-z]{2})\)\s*$', val_str)
+            if match:
+                county_name = match.group(1).strip()
+                state_abbrev = match.group(2).upper()
+                return f"{state_abbrev}{sep}{county_name}"
+            return val_str  # Return original if no match
+        
+        def format_county(val):
+            if pd.isna(val) or str(val).strip() == '':
+                return ''
+            val_str = str(val).strip()
+            
+            if delimiter:
+                parts = [p.strip() for p in val_str.split(delimiter) if p.strip()]
+                formatted = [format_single_county(p) for p in parts]
+                return output_delimiter.join(formatted)
+            else:
+                return format_single_county(val_str)
+        
+        df[col] = df[col].apply(format_county)
+        print(f"  Formatted county column '{col}' with separator '{separator}'")
     
     # 5. Congressional district format (STATE:00)
     congressional_format = transformations.get('congressional_district_format', {})
