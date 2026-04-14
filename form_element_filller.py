@@ -56,20 +56,22 @@ def detect_value_column(template_row: pd.Series) -> str:
     return 'EGMS_HF_Text_Value__c'  # Default to text
 
 
-def format_value(value, column_name: str):
+def format_value(value, column_name: str, delimiter: str = ';'):
     """Format value based on column type."""
     if pd.isna(value) or str(value).strip() == '':
         return ''
     
     val_str = str(value).strip()
     
-    # Complex values need [] wrapper
+    # Complex values need [] wrapper with each value quoted
     if column_name == 'EGMS_HF_Complex_Value__c':
         # If already JSON array, leave it
         if val_str.startswith('['):
             return val_str
-        # Wrap single value in array
-        return f'["{val_str}"]'
+        # Split by delimiter, wrap each value
+        parts = [p.strip() for p in val_str.split(delimiter) if p.strip()]
+        quoted_parts = [f'"{p}"' for p in parts]
+        return f'[{", ".join(quoted_parts)}]'
     
     # Boolean values
     if column_name == 'EGMS_HF_Boolean_Value__c':
@@ -195,6 +197,7 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
         template_config = templates[name_value]
         template_path = template_config['template']
         mapping_path = template_config['mapping']
+        template_transformations = template_config.get('transformations', {})
         
         # Check files exist
         if not os.path.exists(template_path):
@@ -207,6 +210,35 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
             continue
         
         print(f"\n  Processing: {form_id} ({name_value})")
+        
+        # Apply transformations to data row
+        transformed_row = data_row.copy()
+        
+        # replace_text transformation
+        replace_text = template_transformations.get('replace_text', {})
+        for col, replacements in replace_text.items():
+            if col in transformed_row.index:
+                val = transformed_row[col]
+                if pd.notna(val):
+                    val_str = str(val)
+                    for old_text, new_text in replacements.items():
+                        val_str = val_str.replace(old_text, new_text)
+                    transformed_row[col] = val_str
+        
+        # replace_value transformation
+        replace_value = template_transformations.get('replace_value', {})
+        for col, mappings in replace_value.items():
+            if col in transformed_row.index:
+                val = transformed_row[col]
+                if pd.notna(val):
+                    val_str = str(val).strip()
+                    for old_val, new_val in mappings.items():
+                        if val_str.lower() == old_val.lower():
+                            transformed_row[col] = new_val
+                            break
+        
+        # Use transformed_row instead of data_row for the rest
+        data_row = transformed_row
         
         # Load template and mapping
         template_df = pd.read_csv(template_path, dtype=str)
@@ -224,6 +256,9 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
         
         # Copy template
         filled_df = template_df.copy()
+        
+        # Set EGMS_HF_Form__c to the form Id
+        filled_df['EGMS_HF_Form__c'] = form_id
         
         # Update ALL upsert keys with the form Id
         if 'EGMS_HF_Element_Upsert_Key__c' in filled_df.columns:
@@ -312,11 +347,6 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
     # Save all to one file
     if all_filled_dfs:
         combined_df = pd.concat(all_filled_dfs, ignore_index=True)
-        
-        # Keep only upsert key, reporting key, and value columns
-        keep_columns = ['EGMS_HF_Element_Upsert_Key__c', 'EGMS_HF_Reporting_Key__c'] + VALUE_COLUMNS
-        keep_columns = [col for col in keep_columns if col in combined_df.columns]
-        combined_df = combined_df[keep_columns]
         
         output_path = os.path.join(output_dir, "form_elements_import.csv")
         combined_df.to_csv(output_path, index=False)
