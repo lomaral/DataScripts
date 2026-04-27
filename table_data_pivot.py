@@ -8,10 +8,10 @@ Usage:
 
 Input:
     - pivot_config.json with settings
-    - Table data file with multiple rows per ID
+    - Table data file(s) with multiple rows per ID
 
 Output:
-    - Pivoted file with Name_1, Name_2, etc. columns
+    - Pivoted file(s) with Name_1, Name_2, etc. columns
 """
 
 import pandas as pd
@@ -30,36 +30,37 @@ def load_config(config_path: str = "pivot_config.json") -> dict:
         return json.load(f)
 
 
-def pivot_table_data(config: dict, output_dir: str = "output"):
-    """Pivot table data from multiple rows to numbered columns."""
-    print(f"\n{'='*60}")
-    print(f"Pivoting Table Data")
-    print(f"{'='*60}")
-    
+def pivot_single_table(config: dict, output_dir: str = "output"):
+    """Pivot a single table data file."""
     data_file = config['data_file']
     id_column = config['id_column']
-    pivot_columns = config.get('pivot_columns', [])  # Columns to pivot
+    pivot_columns = config.get('pivot_columns', [])
     output_file = config.get('output_file', 'table_pivoted.csv')
     
     # Check file exists
     if not os.path.exists(data_file):
-        print(f"ERROR: Data file not found: {data_file}")
+        print(f"  ERROR: Data file not found: {data_file}")
         return
     
     # Load data
     df = pd.read_csv(data_file, dtype=str)
-    print(f"Data file: {len(df)} rows")
-    print(f"ID column: {id_column}")
-    print(f"Pivot columns: {pivot_columns}")
+    print(f"  Data file: {data_file} ({len(df)} rows)")
+    print(f"  ID column: {id_column}")
+    
+    # Check ID column exists
+    if id_column not in df.columns:
+        print(f"  ERROR: ID column '{id_column}' not found in file")
+        print(f"  Available columns: {list(df.columns)}")
+        return
     
     # If no pivot columns specified, use all except ID
     if not pivot_columns:
         pivot_columns = [col for col in df.columns if col != id_column]
-        print(f"Auto-detected pivot columns: {pivot_columns}")
+        print(f"  Pivot columns: {pivot_columns}")
     
     # Group by ID and count max rows per ID
     max_rows = df.groupby(id_column).size().max()
-    print(f"Max rows per ID: {max_rows}")
+    print(f"  Max rows per ID: {max_rows}")
     
     # Build pivoted data
     pivoted_data = []
@@ -94,9 +95,30 @@ def pivot_table_data(config: dict, output_dir: str = "output"):
     output_path = os.path.join(output_dir, output_file)
     pivoted_df.to_csv(output_path, index=False, encoding='utf-8')
     
-    print(f"\n✓ Pivoted file saved: {output_path}")
-    print(f"  Records: {len(pivoted_df)}")
-    print(f"  Columns: {list(pivoted_df.columns)}")
+    print(f"  ✓ Saved: {output_path} ({len(pivoted_df)} records, {len(pivoted_df.columns)} columns)")
+
+
+def pivot_table_data(config: dict, output_dir: str = "output"):
+    """Pivot table data - handles single or multiple tables."""
+    print(f"\n{'='*60}")
+    print(f"Pivoting Table Data")
+    print(f"{'='*60}")
+    
+    # Check if multiple tables
+    if 'tables' in config:
+        tables = config['tables']
+        print(f"Processing {len(tables)} tables...\n")
+        for i, table_config in enumerate(tables, start=1):
+            print(f"Table {i}:")
+            pivot_single_table(table_config, output_dir)
+            print()
+    else:
+        # Single table
+        pivot_single_table(config, output_dir)
+    
+    print(f"{'='*60}")
+    print("Done!")
+    print(f"{'='*60}")
 
 
 def main():
