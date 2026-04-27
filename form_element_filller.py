@@ -106,19 +106,58 @@ def fill_table_value(complex_value: str, table_row: str, table_column: str, new_
             return complex_value
         
         # Find the row and update the column
+        row_found = False
         for row in data:
             if isinstance(row, dict):
                 # Check if this row matches by elementTemplateKey containing table_row
                 element_key = row.get('elementTemplateKey', '')
                 if table_row in element_key:
                     row[table_column] = str(new_value).strip()
+                    row_found = True
                     break
+        
+        # If row not found, duplicate ROW_1 and create new row
+        if not row_found and 'ROW_' in table_row:
+            # Find ROW_1 template
+            row_1_template = None
+            for row in data:
+                if isinstance(row, dict):
+                    element_key = row.get('elementTemplateKey', '')
+                    if 'ROW_1' in element_key:
+                        row_1_template = row.copy()
+                        break
+            
+            if row_1_template:
+                # Create new row by replacing ROW_1 with target row
+                new_row = {}
+                for key, val in row_1_template.items():
+                    if key == 'elementTemplateKey':
+                        new_row[key] = val.replace('ROW_1', table_row)
+                    else:
+                        new_row[key] = ''  # Clear other values
+                
+                # Set the value for this column
+                new_row[table_column] = str(new_value).strip()
+                data.append(new_row)
         
         return json.dumps(data)
     
     except json.JSONDecodeError:
         print(f"    WARNING: Could not parse complex value as JSON")
         return complex_value
+
+
+def extract_row_suffix(column_name: str) -> tuple:
+    """Extract base column name and row number from Name_1, Name_2, etc.
+    
+    Returns:
+        (base_name, row_number) or (column_name, None) if no suffix
+    """
+    import re
+    match = re.match(r'^(.+)_(\d+)$', column_name)
+    if match:
+        return match.group(1), int(match.group(2))
+    return column_name, None
 
 
 def update_upsert_key(upsert_key: str, new_form_id: str) -> str:
@@ -308,6 +347,29 @@ def process_all_forms(config: dict, output_dir: str = "application_form"):
                 data_type_value = entry['data_type_value']
                 
                 if not legacy_field:
+                    continue
+                
+                # Check if table field with dynamic rows (table_column set but no table_row)
+                # This handles Name_1, Name_2, etc. from pivoted data
+                if table_column and not table_row:
+                    # Look for all columns matching pattern: legacy_field_1, legacy_field_2, etc.
+                    for col_name in data_row.index:
+                        base_name, row_num = extract_row_suffix(col_name)
+                        if base_name == legacy_field and row_num is not None:
+                            value = data_row[col_name]
+                            if pd.isna(value) or str(value).strip() == '':
+                                continue
+                            
+                            # Build table_row from row number
+                            dynamic_table_row = f"ROW_{row_num}"
+                            
+                            # Table field - update complex value JSON
+                            complex_col = 'EGMS_HF_Complex_Value__c'
+                            if complex_col in filled_df.columns:
+                                current_value = filled_df.at[t_idx, complex_col]
+                                new_value = fill_table_value(current_value, dynamic_table_row, table_column, value)
+                                filled_df.at[t_idx, complex_col] = new_value
+                                table_count += 1
                     continue
                 
                 # Get value from data file
